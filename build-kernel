@@ -1,0 +1,84 @@
+#!/bin/bash
+typeset -A overlays kernel bsp
+
+defconfig="linux-defconfig-full.config"
+overlays=(
+	[repo]="https://github.com/radxa/overlays.git"
+	[commit]="main"
+)
+kernel=(
+	[repo]="https://github.com/radxa/kernel.git"
+	[commit]="linux-5.10-gen-rkr3.4"
+)
+bsp=(
+	[repo]="https://github.com/radxa-repo/bsp.git"
+	[commit]="main"
+)
+patches=(
+	../bsp/linux/rockchip/0010-backport/000[345]*
+	../bsp/linux/rockchip/0020-rock4/000[2345]*
+	../bsp/linux/rockchip/0200-panfork/000[12345]*
+	../bsp/linux/rockchip/0100-vendor/000[1-9]*
+	../bsp/linux/rockchip/0100-vendor/0010*
+	../bsp/linux/rockchip/0100-vendor/0012*
+)
+
+
+git_clone() {
+	declare -n src=$1
+	local repo="${src[repo]}"
+	local commit="${src[commit]}"
+	if [ ! -f ".${!src}_clone.stamp" ]; then
+		echo "Cloning Radxa $name repository..."
+		git clone --depth=1 --branch=$commit $repo || exit 1
+		pushd ${!src} || exit 1
+			git submodule init
+			git submodule update
+		popd || exit 1
+		touch ".${!src}_clone.stamp" || exit 1
+	fi
+}
+
+git_clone overlays
+git_clone kernel
+git_clone bsp
+
+if [ ! -f ".kernel_overlay.stamp" ]; then
+	echo "Applying Radxa overlay..."
+	pushd kernel || exit 1
+		git checkout -b "${kernel[commit]}-rock5b" || git checkout "${kernel[commit]}-rock5b" || exit 1
+		cp -rv ../overlays/arch . || exit 1
+		git add -A || exit 1
+		git commit -m "Adding overlays from ${kernel[repo]}" || exit 1
+	popd || exit 1
+	touch ".kernel_overlay.stamp" || exit 1
+fi
+
+if [ ! -f ".kernel_patch.stamp" ]; then
+	echo "Applying Radxa kernel patches..."
+	pushd kernel || exit 1
+		#for patch in ${patches[@]}; do
+		#	echo "Patch $patch..."
+		#	git am --reject --whitespace=fix "$patch" || exit 1
+		#done
+		find ../bsp/linux/rockchip -type f -name "*.patch" | \
+			sort | \
+			while IFS= read -r patch; do
+				git am --reject --whitespace=fix "$patch" || exit 1
+			done
+	popd
+	touch ".kernel_patch.stamp" || exit 1
+fi
+
+echo "Creating patchset in ./patch"
+mkdir -p patch/ && rm -rf patch/*
+pushd kernel
+	git format-patch origin/${kernel[commit]}..HEAD -o ../patch
+popd
+
+echo "Making the kernel"
+cp $defconfig kernel/.config
+pushd kernel || exit 1
+	make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j9         || exit 1
+	make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- -j9 modules || exit 1
+popd || exit 1
